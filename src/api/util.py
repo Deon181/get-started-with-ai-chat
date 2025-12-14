@@ -48,3 +48,4 @@ class Message(pydantic.BaseModel):
 
 class ChatRequest(pydantic.BaseModel):
     messages: list[Message]
+    conversation_id: Optional[str] = None

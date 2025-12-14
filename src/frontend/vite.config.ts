@@ -18,16 +18,6 @@ export default defineConfig({
       input: {
         main: "./src/main.tsx",
       },
-      output: {
-        entryFileNames: "assets/main-react-app.js",
-        chunkFileNames: "assets/[name].js",
-        assetFileNames: (assetInfo) => {
-          if (assetInfo.name === "style.css") {
-            return "assets/main-react-app.css";
-          }
-          return "assets/[name][extname]";
-        },
-      },
     },
   },
 });

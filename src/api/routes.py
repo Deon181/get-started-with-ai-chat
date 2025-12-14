@@ -4,24 +4,24 @@
 import json
 import logging
 import os
-from typing import Dict
+import secrets
+from typing import Dict, List, Optional
 
 import fastapi
-from fastapi import Request, Depends
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from azure.ai.inference.prompts import PromptTemplate
 from azure.ai.inference.aio import ChatCompletionsClient
+from pydantic import BaseModel
 
-from .util import get_logger, ChatRequest
+from .chat_store import ChatStore
 from .search_index_manager import SearchIndexManager
+from .util import ChatRequest, get_logger
 from azure.core.exceptions import HttpResponseError
 
 
-from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
-from typing import Optional
-import secrets
 
 security = HTTPBasic()
 
@@ -60,6 +60,10 @@ templates = Jinja2Templates(directory="api/templates")
 
 
 # Accessors to get app state
+def get_chat_store(request: Request) -> ChatStore:
+    return request.app.state.chat_store
+
+
 def get_chat_client(request: Request) -> ChatCompletionsClient:
     return request.app.state.chat
 
@@ -71,18 +75,118 @@ def get_chat_model(request: Request) -> str:
 def get_search_index_namager(request: Request) -> SearchIndexManager:
     return request.app.state.search_index_manager
 
+
+class ConversationCreate(BaseModel):
+    title: Optional[str] = None
+
+
+class ConversationResponse(BaseModel):
+    id: str
+    title: Optional[str]
+    created_at: str
+    updated_at: str
+    last_message: Optional[str] = None
+
+
+class ConversationsResponse(BaseModel):
+    conversations: List[ConversationResponse]
+
+
+class MessageResponse(BaseModel):
+    id: int
+    role: str
+    content: str
+    created_at: str
+    metadata: Optional[dict] = None
+
+
+class MessagesResponse(BaseModel):
+    messages: List[MessageResponse]
+
 def serialize_sse_event(data: Dict) -> str:
     return f"data: {json.dumps(data)}\n\n"
 
 
 @router.get("/", response_class=HTMLResponse)
 async def index_name(request: Request, _ = auth_dependency):
+    # Read the manifest file to get the hashed filenames
+    manifest_path = "api/static/react/.vite/manifest.json"
+    js_url = "/static/react/assets/main-react-app.js" # Fallback
+    css_url = "/static/react/assets/main-react-app.css" # Fallback
+
+    if os.path.exists(manifest_path):
+        with open(manifest_path, "r") as f:
+            manifest = json.load(f)
+            if "src/main.tsx" in manifest:
+                js_file = manifest["src/main.tsx"]["file"]
+                js_url = f"/static/react/{js_file}"
+            
+            # Simple heuristic: find the first CSS file in the manifest or linked from main
+            # Based on observed manifest, style.css is a top level key
+            if "style.css" in manifest:
+                css_file = manifest["style.css"]["file"]
+                css_url = f"/static/react/{css_file}"
+            # Also check if it's nested under the entry (standard vite behavior sometimes)
+            elif "src/main.tsx" in manifest and "css" in manifest["src/main.tsx"]:
+                 css_file = manifest["src/main.tsx"]["css"][0]
+                 css_url = f"/static/react/{css_file}"
+
     return templates.TemplateResponse(
         "index.html", 
         {
             "request": request,
+            "js_url": js_url,
+            "css_url": css_url,
         }
     )
+
+
+@router.post("/conversations", response_model=ConversationResponse)
+async def create_conversation(
+    conversation: ConversationCreate | None = None,
+    chat_store: ChatStore = Depends(get_chat_store),
+    _ = auth_dependency,
+):
+    conversation_row = chat_store.create_conversation(conversation.title if conversation else None)
+    return {**conversation_row, "last_message": None}
+
+
+@router.get("/conversations", response_model=ConversationsResponse)
+async def list_conversations(
+    limit: int = 20,
+    offset: int = 0,
+    chat_store: ChatStore = Depends(get_chat_store),
+    _ = auth_dependency,
+):
+    conversations = chat_store.list_conversations(limit=limit, offset=offset)
+    return {"conversations": conversations}
+
+
+@router.get("/conversations/{conversation_id}/messages", response_model=MessagesResponse)
+async def list_messages(
+    conversation_id: str,
+    limit: int = 200,
+    offset: int = 0,
+    chat_store: ChatStore = Depends(get_chat_store),
+    _ = auth_dependency,
+):
+    if not chat_store.conversation_exists(conversation_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
+    messages = chat_store.get_messages(conversation_id, limit=limit, offset=offset)
+    return {"messages": messages}
+
+
+@router.delete("/conversations/{conversation_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_conversation(
+    conversation_id: str,
+    chat_store: ChatStore = Depends(get_chat_store),
+    _ = auth_dependency,
+):
+    if not chat_store.conversation_exists(conversation_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
+    chat_store.delete_conversation(conversation_id)
+    return fastapi.Response(status_code=status.HTTP_204_NO_CONTENT)
+
 
 @router.post("/chat")
 async def chat_stream_handler(
@@ -90,6 +194,7 @@ async def chat_stream_handler(
     chat_client: ChatCompletionsClient = Depends(get_chat_client),
     model_deployment_name: str = Depends(get_chat_model),
     search_index_manager: SearchIndexManager = Depends(get_search_index_namager),
+    chat_store: ChatStore = Depends(get_chat_store),
     _ = auth_dependency
 ) -> fastapi.responses.StreamingResponse:
     
@@ -101,8 +206,26 @@ async def chat_stream_handler(
     if chat_client is None:
         raise Exception("Chat client not initialized")
 
+    if chat_request.conversation_id:
+        if not chat_store.conversation_exists(chat_request.conversation_id):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
+        conversation_id = chat_request.conversation_id
+    else:
+        conversation = chat_store.create_conversation()
+        conversation_id = conversation["id"]
+
     async def response_stream():
-        messages = [{"role": message.role, "content": message.content} for message in chat_request.messages]
+        yield serialize_sse_event({"type": "conversation", "conversation_id": conversation_id})
+
+        # Persist incoming user messages and build full history for the model
+        incoming_messages = chat_request.messages or []
+        for msg in incoming_messages:
+            chat_store.append_message(conversation_id, msg.role, msg.content)
+
+        history_messages = [
+            {"role": message["role"], "content": message["content"]}
+            for message in chat_store.get_messages(conversation_id)
+        ]
 
         prompt_messages = PromptTemplate.from_string('You are a helpful assistant').create_messages()
         # Use RAG model, only if we were provided index and we have found a context there.
@@ -119,7 +242,7 @@ async def chat_stream_handler(
         try:
             accumulated_message = ""
             chat_coroutine = await chat_client.complete(
-                model=model_deployment_name, messages=prompt_messages + messages, stream=True
+                model=model_deployment_name, messages=prompt_messages + history_messages, stream=True
             )
             async for event in chat_coroutine:
                 if event.choices:
@@ -137,6 +260,8 @@ async def chat_stream_handler(
                 "content": accumulated_message,
                 "type": "completed_message",
             })                        
+            if accumulated_message:
+                chat_store.append_message(conversation_id, "assistant", accumulated_message)
         except BaseException as e:
             error_processed = False
             response = "There is an error!"

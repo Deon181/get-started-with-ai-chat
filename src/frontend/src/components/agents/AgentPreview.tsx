@@ -1,4 +1,4 @@
-import { ReactNode, useState, useMemo } from "react";
+import { ReactNode, useEffect, useMemo, useState } from "react";
 import {
   Body1,
   Button,
@@ -41,32 +41,116 @@ interface IAgentPreviewProps {
   agentDetails: IAgent;
 }
 
+interface ConversationSummary {
+  id: string;
+  title?: string | null;
+  created_at?: string;
+  updated_at?: string;
+  last_message?: string | null;
+}
+
 
 export function AgentPreview({ agentDetails }: IAgentPreviewProps): ReactNode {
   const [isSettingsPanelOpen, setIsSettingsPanelOpen] = useState(false);
   const [messageList, setMessageList] = useState<IChatItem[]>([]);
   const [isResponding, setIsResponding] = useState(false);
-
-
-
+  const [conversationId, setConversationId] = useState<string | null>(null);
+  const [conversations, setConversations] = useState<ConversationSummary[]>([]);
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false);
 
   const handleSettingsPanelOpenChange = (isOpen: boolean) => {
     setIsSettingsPanelOpen(isOpen);
   };
 
-  const newThread = () => {
-    setMessageList([]);
-    deleteAllCookies();
+  const loadMessages = async (id: string) => {
+    setIsLoadingHistory(true);
+    setIsResponding(false);
+    try {
+      const response = await fetch(`/conversations/${id}/messages`);
+      if (!response.ok) {
+        console.error("[ChatClient] Failed to load messages", response.status);
+        return;
+      }
+      const data = await response.json();
+      const mapped: IChatItem[] =
+        data?.messages?.map((msg: any) => ({
+          id: `msg-${msg.id}`,
+          role: msg.role,
+          content: msg.content,
+          isAnswer: msg.role === "assistant",
+          more: msg.created_at ? { time: msg.created_at } : undefined,
+        })) ?? [];
+      setMessageList(mapped);
+    } catch (error) {
+      console.error("[ChatClient] Failed to load messages:", error);
+    } finally {
+      setIsLoadingHistory(false);
+    }
   };
 
-  const deleteAllCookies = (): void => {
-    document.cookie.split(";").forEach((cookieStr: string) => {
-      const trimmedCookieStr = cookieStr.trim();
-      const eqPos = trimmedCookieStr.indexOf("=");
-      const name =
-        eqPos > -1 ? trimmedCookieStr.substring(0, eqPos) : trimmedCookieStr;
-      document.cookie = name + "=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/";
-    });
+  const fetchConversations = async (selectIfMissing = true) => {
+    try {
+      const response = await fetch("/conversations");
+      if (!response.ok) {
+        console.error("[ChatClient] Failed to load conversations", response.status);
+        return;
+      }
+      const data = await response.json();
+      const items: ConversationSummary[] = data?.conversations ?? [];
+      setConversations(items);
+      if (items.length > 0 && (!conversationId && selectIfMissing)) {
+        const nextId = items[0].id;
+        setConversationId(nextId);
+        await loadMessages(nextId);
+      }
+      if (items.length === 0 && !conversationId) {
+        await newThread();
+      }
+    } catch (error) {
+      console.error("[ChatClient] Failed to fetch conversations:", error);
+    }
+  };
+
+  useEffect(() => {
+    void fetchConversations();
+  }, []);
+
+  const newThread = async (): Promise<string | null> => {
+    try {
+      const response = await fetch("/conversations", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      if (!response.ok) {
+        console.error("[ChatClient] Failed to create conversation", response.status);
+        return null;
+      }
+      const data = await response.json();
+      setConversationId(data.id);
+      setMessageList([]);
+      await fetchConversations(false);
+      return data.id as string;
+    } catch (error) {
+      console.error("[ChatClient] Failed to start new conversation:", error);
+    }
+    return null;
+  };
+
+  const deleteConversation = async (id?: string | null) => {
+    if (!id) return;
+    try {
+      const response = await fetch(`/conversations/${id}`, { method: "DELETE" });
+      if (!response.ok) {
+        console.error("[ChatClient] Failed to delete conversation", response.status);
+        return;
+      }
+      setMessageList([]);
+      setConversationId(null);
+      await fetchConversations();
+    } catch (error) {
+      console.error("[ChatClient] Failed to delete conversation:", error);
+    }
   };
 
   const onSend = async (message: string) => {
@@ -80,32 +164,35 @@ export function AgentPreview({ agentDetails }: IAgentPreviewProps): ReactNode {
     setMessageList((prev) => [...prev, userMessage]);
 
     try {
-      const messages = [...messageList, userMessage].map((item) => ({
-        role: item.role,
-        content: item.content,
-      }));
-      const postData = {messages};
-      // IMPORTANT: Add credentials: 'include' if server cookies are critical
-      // and if your backend is on the same domain or properly configured for cross-site cookies.
+      let activeConversationId = conversationId;
+      if (!activeConversationId) {
+        activeConversationId = await newThread();
+      }
+      if (!activeConversationId) {
+        console.error("[ChatClient] No conversation id available.");
+        return;
+      }
+      const postData = {
+        conversation_id: activeConversationId,
+        messages: [{ role: "user", content: message }],
+      };
 
-      setIsResponding(true);      
+      setIsResponding(true);
       const response = await fetch("/chat", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify(postData),
-        credentials: "include", // <--- allow cookies to be included
+        credentials: "include",
       });
 
-      // Log out the response status in case there’s an error
       console.log(
         "[ChatClient] Response status:",
         response.status,
         response.statusText
       );
 
-      // If server returned e.g. 400 or 500, that’s not an exception, but we can check manually:
       if (!response.ok) {
         console.error(
           "[ChatClient] The server has returned an error:",
@@ -121,7 +208,6 @@ export function AgentPreview({ agentDetails }: IAgentPreviewProps): ReactNode {
         );
       }
 
-      console.log("[ChatClient] Starting to handle streaming response...");
       handleMessages(response.body);
     } catch (error: any) {
       setIsResponding(false);
@@ -149,13 +235,11 @@ export function AgentPreview({ agentDetails }: IAgentPreviewProps): ReactNode {
       while (true) {
         const { done, value } = await reader.read();
         if (done) {
-          console.log("[ChatClient] SSE stream ended by server.");
           break;
         }
 
         // Convert the incoming Uint8Array to text
         const textChunk = decoder.decode(value, { stream: true });
-        console.log("[ChatClient] Raw chunk from stream:", textChunk);
 
         buffer += textChunk;
         let boundary = buffer.indexOf("\n");
@@ -165,10 +249,7 @@ export function AgentPreview({ agentDetails }: IAgentPreviewProps): ReactNode {
           const chunk = buffer.slice(0, boundary).trim();
           buffer = buffer.slice(boundary + 1);
 
-          console.log("[ChatClient] SSE line:", chunk); // log each line we extract
-
           if (chunk.startsWith("data: ")) {
-            // Attempt to parse JSON
             const jsonStr = chunk.slice(6);
             let data;
             try {
@@ -179,14 +260,13 @@ export function AgentPreview({ agentDetails }: IAgentPreviewProps): ReactNode {
               continue;
             }
 
-            console.log("[ChatClient] Parsed SSE event:", data);
+            if (data.type === "conversation" && data.conversation_id) {
+              setConversationId(data.conversation_id);
+            }
 
             if (data.error) {
               if (!chatItem) {
                 chatItem = createAssistantMessageDiv();
-                console.log(
-                  "[ChatClient] Created new messageDiv for assistant."
-                );
               }
 
               setIsResponding(false);
@@ -198,42 +278,26 @@ export function AgentPreview({ agentDetails }: IAgentPreviewProps): ReactNode {
               return;
             }
 
-            // Check the data type to decide how to update the UI
             if (data.type === "stream_end") {
-              // End of the stream
-              console.log("[ChatClient] Stream end marker received.");
               setIsResponding(false);
-              
+              void fetchConversations(false);
               break;
-            } 
-            
-            else {
+            } else {
               if (!chatItem) {
                 chatItem = createAssistantMessageDiv();
-                console.log(
-                  "[ChatClient] Created new messageDiv for assistant."
-                );
               }
 
               if (data.type === "completed_message") {
                 clearAssistantMessage(chatItem);
                 accumulatedContent = data.content;
                 isStreaming = false;
-                console.log(
-                  "[ChatClient] Received completed message:",
-                  accumulatedContent
-                );
 
                 setIsResponding(false);
+                void fetchConversations(false);
               } else {
                 accumulatedContent += data.content;
-                console.log(
-                  "[ChatClient] Received streaming chunk:",
-                  data.content
-                );
               }
 
-            //   // Update the UI with the accumulated content
               appendAssistantMessage(chatItem, accumulatedContent, isStreaming);
             }
           }
@@ -246,11 +310,12 @@ export function AgentPreview({ agentDetails }: IAgentPreviewProps): ReactNode {
     // Catch errors from the stream reading process
     readStream().catch((error) => {
       console.error("[ChatClient] Stream reading failed:", error);
+      setIsResponding(false);
     });
   };
 
   const createAssistantMessageDiv: () => IChatItem = () => {
-    var item = { id: crypto.randomUUID(), content: "", isAnswer: true, more: { time: new Date().toISOString() } };
+    const item = { id: crypto.randomUUID(), content: "", isAnswer: true, more: { time: new Date().toISOString() } };
     setMessageList((prev) => [...prev, item]);
     return item;
   };
@@ -260,20 +325,15 @@ export function AgentPreview({ agentDetails }: IAgentPreviewProps): ReactNode {
     isStreaming: boolean,
   ) => {
     try {
-      // Preprocess content to convert citations to links using the updated annotation data
-
       if (!chatItem) {
         throw new Error("Message content div not found in the template.");
       }
 
-      // Set the innerHTML of the message text div to the HTML content
       chatItem.content = accumulatedContent;
       setMessageList((prev) => {
         return [...prev.slice(0, -1), { ...chatItem }];
       });
 
-      // Use requestAnimationFrame to ensure the DOM has updated before scrolling
-      // Only scroll if stop streaming
       if (!isStreaming) {
         requestAnimationFrame(() => {
           const lastChild = document.getElementById(`msg-${chatItem.id}`);
@@ -330,8 +390,14 @@ export function AgentPreview({ agentDetails }: IAgentPreviewProps): ReactNode {
       key: "feedback",
       children: "Send Feedback",
       onClick: () => {
-        // Handle send feedback click
         alert("Thank you for your feedback!");
+      },
+    },
+    {
+      key: "delete",
+      children: "Delete Chat",
+      onClick: () => {
+        void deleteConversation(conversationId);
       },
     },
   ];
@@ -339,16 +405,40 @@ export function AgentPreview({ agentDetails }: IAgentPreviewProps): ReactNode {
   const chatContext = useMemo(
     () => ({
       messageList,
-      isResponding,
+      isResponding: isResponding || isLoadingHistory,
       onSend,
     }),
-    [messageList, isResponding]
+    [messageList, isResponding, isLoadingHistory]
   );
+
+  const handleConversationSelect = async (id: string) => {
+    setConversationId(id);
+    await loadMessages(id);
+  };
 
   return (
     <div className={styles.container}>
       <div className={styles.topBar}>
         <div className={styles.leftSection}>
+          <select
+            className={styles.conversationSelect}
+            value={conversationId ?? ""}
+            onChange={(e) => {
+              const id = e.target.value;
+              if (id) {
+                void handleConversationSelect(id);
+              }
+            }}
+          >
+            <option value="" disabled>
+              Select chat
+            </option>
+            {conversations.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.title || `Chat ${c.id.slice(0, 8)}`}
+              </option>
+            ))}
+          </select>
           {messageList.length > 0 && (
             <>
               <AgentIcon
@@ -361,14 +451,20 @@ export function AgentPreview({ agentDetails }: IAgentPreviewProps): ReactNode {
           )}
         </div>
         <div className={styles.rightSection}>
-          {" "}
           <Button
             appearance="subtle"
             icon={<ChatRegular aria-hidden={true} />}
-            onClick={newThread}
+            onClick={() => void newThread()}
           >
             New Chat
-          </Button>{" "}
+          </Button>
+          <Button
+            appearance="subtle"
+            disabled={!conversationId}
+            onClick={() => void deleteConversation(conversationId)}
+          >
+            Delete
+          </Button>
           <MenuButton
             menuButtonText=""
             menuItems={menuItems}
@@ -380,24 +476,27 @@ export function AgentPreview({ agentDetails }: IAgentPreviewProps): ReactNode {
           />
         </div>
       </div>
-      <div className={styles.content}>          <>
-            {messageList.length === 0 && (
-              <div className={styles.emptyChatContainer}>
-                <AgentIcon
-                  alt=""
-                  iconClassName={styles.emptyStateAgentIcon}
-                  iconName={agentDetails.metadata?.logo}
-                />
-                <Caption1 className={styles.agentName}>
-                  {agentDetails.name}
-                </Caption1>
-                <Title2>How can I help you today?</Title2>
-              </div>
-            )}
-            <AgentPreviewChatBot
-              agentName={agentDetails.name}
-              agentLogo={agentDetails.metadata?.logo}
-              chatContext={chatContext}            />          </>
+      <div className={styles.content}>
+        <>
+          {messageList.length === 0 && (
+            <div className={styles.emptyChatContainer}>
+              <AgentIcon
+                alt=""
+                iconClassName={styles.emptyStateAgentIcon}
+                iconName={agentDetails.metadata?.logo}
+              />
+              <Caption1 className={styles.agentName}>
+                {agentDetails.name}
+              </Caption1>
+              <Title2>How can I help you today?</Title2>
+            </div>
+          )}
+          <AgentPreviewChatBot
+            agentName={agentDetails.name}
+            agentLogo={agentDetails.metadata?.logo}
+            chatContext={chatContext}
+          />
+        </>
       </div>
 
       {/* Settings Panel */}

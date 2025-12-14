@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 from fastapi.staticfiles import StaticFiles
 
 from .search_index_manager import SearchIndexManager
+from .chat_store import ChatStore
 from .util import get_logger
 
 logger = None
@@ -139,6 +140,9 @@ def create_app():
 
     app = fastapi.FastAPI(lifespan=lifespan)
     app.mount("/static", StaticFiles(directory="api/static"), name="static")
+
+    chat_db_path = os.getenv("CHAT_DB_PATH", "api/data/chat.db")
+    app.state.chat_store = ChatStore(chat_db_path)
 
     from . import routes  # noqa
 

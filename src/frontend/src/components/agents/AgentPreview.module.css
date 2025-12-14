@@ -107,3 +107,12 @@
   align-items: center;
   width: 100%;
 }
+
+.conversationSelect {
+  min-width: 170px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--colorNeutralStroke1);
+  background-color: var(--colorNeutralBackground1);
+  color: var(--colorNeutralForeground1);
+}
