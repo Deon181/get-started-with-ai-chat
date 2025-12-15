@@ -75,6 +75,9 @@ def get_chat_model(request: Request) -> str:
 def get_search_index_namager(request: Request) -> SearchIndexManager:
     return request.app.state.search_index_manager
 
+def get_workflow_client(request: Request):
+    return getattr(request.app.state, "workflow_client", None)
+
 
 class ConversationCreate(BaseModel):
     title: Optional[str] = None
@@ -195,6 +198,7 @@ async def chat_stream_handler(
     model_deployment_name: str = Depends(get_chat_model),
     search_index_manager: SearchIndexManager = Depends(get_search_index_namager),
     chat_store: ChatStore = Depends(get_chat_store),
+    workflow_client = Depends(get_workflow_client),
     _ = auth_dependency
 ) -> fastapi.responses.StreamingResponse:
     
@@ -203,6 +207,84 @@ async def chat_stream_handler(
         "Connection": "keep-alive",
         "Content-Type": "text/event-stream"
     }    
+    
+    # If the workflow client is enabled, we bypass the standard chat logic
+    if workflow_client:
+        # We can still validate/create conversation
+        if chat_request.conversation_id:
+            if not chat_store.conversation_exists(chat_request.conversation_id):
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
+            conversation_id = chat_request.conversation_id
+        else:
+            conversation = chat_store.create_conversation()
+            conversation_id = conversation["id"]
+
+        async def workflow_stream():
+            yield serialize_sse_event({"type": "conversation", "conversation_id": conversation_id})
+            
+            # Persist user message
+            incoming_messages = chat_request.messages or []
+            for msg in incoming_messages:
+                chat_store.append_message(conversation_id, msg.role, msg.content)
+
+            # Get full history (WorkflowClient might want it, or we just send latest)
+            # Our WorkflowClient logic sends the latest user message.
+            history_messages = [
+                {"role": message["role"], "content": message["content"]}
+                for message in chat_store.get_messages(conversation_id)
+            ]
+
+            try:
+                accumulated_response = ""
+                async for chunk in workflow_client.stream_conversation(history_messages, conversation_id):
+                    # The workflow client yields pre-formatted data: lines. 
+                    # But wait, our client yields raw data content strings or jsons? 
+                    # Let's check WorkflowClient.stream_conversation:
+                    # It calls `yield decoded_line[5:].strip()` for SSE 
+                    # OR `yield json.dumps({...})` for non-streaming.
+                    # But serialize_sse_event expects a Dict.
+                    
+                    # WorkflowClient yields STRINGS (json string content of the data: field).
+                    # But serialize_sse_event takes a Dict. 
+                    
+                    # Let's verify WorkflowClient output.
+                    # It yields `decoded_line[5:].strip()` which is the JSON payload of the SSE event.
+                    
+                    try:
+                        data = json.loads(chunk)
+                        
+                        # Capture content for persistence
+                        if data.get("type") in ["message", "completed_message"] and "content" in data:
+                            # Avoid double counting if we get both message and completed_message with same content
+                            # But typical SSE from standard chat sends deltas, then completed.
+                            # Standard AI Foundry usually sends "content" as delta.
+                            # If it's a delta:
+                            if data.get("type") == "message":
+                                accumulated_response += data["content"]
+                        
+                        yield serialize_sse_event(data)
+                    except json.JSONDecodeError:
+                        # Fallback if raw string
+                        logger.warning(f"Could not parse workflow chunk: {chunk}")
+                        pass
+                
+                # Persist assistant response
+                if accumulated_response:
+                    chat_store.append_message(conversation_id, "assistant", accumulated_response)
+                    
+                yield serialize_sse_event({"type": "stream_end"})
+
+            except Exception as e:
+                logger.error(f"Workflow error: {e}")
+                yield serialize_sse_event({
+                    "content": f"Error calling workflow: {str(e)}",
+                    "type": "completed_message"
+                })
+                yield serialize_sse_event({"type": "stream_end"})
+
+        return StreamingResponse(workflow_stream(), headers=headers)
+
+
     if chat_client is None:
         raise Exception("Chat client not initialized")
 

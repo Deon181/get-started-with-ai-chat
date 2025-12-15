@@ -100,6 +100,17 @@ async def lifespan(app: fastapi.FastAPI):
     app.state.chat = chat
     app.state.search_index_manager = search_index_manager
     app.state.chat_model = os.environ["AZURE_AI_CHAT_DEPLOYMENT_NAME"]
+
+    # Initialize Workflow Client if configured
+    workflow_endpoint = os.getenv("AZURE_WORKFLOW_ENDPOINT")
+    if workflow_endpoint:
+        from .workflow_client import WorkflowClient
+        logger.info(f"Initializing Workflow Client with endpoint: {workflow_endpoint}")
+        # Use the same credential as other clients
+        app.state.workflow_client = WorkflowClient(endpoint=workflow_endpoint, credential=azure_credential)
+    else:
+        app.state.workflow_client = None
+
     yield
 
     await project.close()
