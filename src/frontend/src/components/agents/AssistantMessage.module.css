@@ -85,3 +85,41 @@
   margin-top: 12px;
   font-style: italic;
 }
+
+/* Thoughts / Milestones */
+.thoughtContainer {
+  margin-bottom: 12px;
+  border: 1px solid var(--colorNeutralStroke2);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.thoughtSummary {
+  padding: 8px;
+  background-color: var(--colorNeutralBackground3);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  user-select: none;
+  display: flex;
+  align-items: center;
+}
+
+.thoughtContent {
+  padding: 8px;
+  background-color: var(--colorNeutralBackground2);
+  font-size: 13px;
+  border-top: 1px solid var(--colorNeutralStroke2);
+}
+
+.thoughtItem {
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px dashed var(--colorNeutralStroke2);
+}
+
+.thoughtItem:last-child {
+  margin-bottom: 0;
+  border-bottom: none;
+  padding-bottom: 0;
+}

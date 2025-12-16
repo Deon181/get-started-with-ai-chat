@@ -227,10 +227,14 @@ export function AgentPreview({ agentDetails }: IAgentPreviewProps): ReactNode {
     let isStreaming = true;
     let buffer = "";
 
+    // Track multi-step workflow messages
+    const messageMap = new Map<string, string>();
+    const messageOrder: string[] = [];
+
     // Create a reader for the SSE stream
     const reader = stream.getReader();
     const decoder = new TextDecoder();
-    
+
     const readStream = async () => {
       while (true) {
         const { done, value } = await reader.read();
@@ -287,6 +291,11 @@ export function AgentPreview({ agentDetails }: IAgentPreviewProps): ReactNode {
                 chatItem = createAssistantMessageDiv();
               }
 
+              let thoughts: string[] = [];
+              if (messageOrder.length > 0) {
+                thoughts = messageOrder.slice(0, -1).map(mid => messageMap.get(mid) || "");
+              }
+
               if (data.type === "completed_message") {
                 clearAssistantMessage(chatItem);
                 accumulatedContent = data.content;
@@ -294,11 +303,31 @@ export function AgentPreview({ agentDetails }: IAgentPreviewProps): ReactNode {
 
                 setIsResponding(false);
                 void fetchConversations(false);
-              } else {
-                accumulatedContent += data.content;
-              }
 
-              appendAssistantMessage(chatItem, accumulatedContent, isStreaming);
+                appendAssistantMessage(chatItem, accumulatedContent, isStreaming, thoughts);
+              } else if (data.type === "message_delta") {
+                // New logic for handling structured thoughts + answer
+                const id = data.id || "default";
+                if (!messageMap.has(id)) {
+                  messageMap.set(id, "");
+                  messageOrder.push(id);
+                }
+                const current = messageMap.get(id) || "";
+                messageMap.set(id, current + data.content);
+
+                // Determine thoughts vs answer (last one is answer)
+                if (messageOrder.length > 0) {
+                  thoughts = messageOrder.slice(0, -1).map(mid => messageMap.get(mid) || "");
+                  const answerId = messageOrder[messageOrder.length - 1];
+                  accumulatedContent = messageMap.get(answerId) || "";
+                }
+
+                appendAssistantMessage(chatItem, accumulatedContent, isStreaming, thoughts);
+              } else {
+                // Fallback for standard messages
+                accumulatedContent += data.content;
+                appendAssistantMessage(chatItem, accumulatedContent, isStreaming, thoughts);
+              }
             }
           }
 
@@ -323,6 +352,7 @@ export function AgentPreview({ agentDetails }: IAgentPreviewProps): ReactNode {
     chatItem: IChatItem,
     accumulatedContent: string,
     isStreaming: boolean,
+    thoughts: string[] = []
   ) => {
     try {
       if (!chatItem) {
@@ -330,6 +360,8 @@ export function AgentPreview({ agentDetails }: IAgentPreviewProps): ReactNode {
       }
 
       chatItem.content = accumulatedContent;
+      chatItem.thoughts = thoughts;
+
       setMessageList((prev) => {
         return [...prev.slice(0, -1), { ...chatItem }];
       });
@@ -340,7 +372,7 @@ export function AgentPreview({ agentDetails }: IAgentPreviewProps): ReactNode {
           if (lastChild) {
             lastChild.scrollIntoView({ behavior: "smooth", block: "end" });
           }
-       });
+        });
       }
     } catch (error) {
       console.error("Error in appendAssistantMessage:", error);

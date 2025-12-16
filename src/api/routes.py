@@ -220,6 +220,7 @@ async def chat_stream_handler(
             conversation_id = conversation["id"]
 
         async def workflow_stream():
+            logger.info("Starting workflow stream with request: %s", chat_request.json())
             yield serialize_sse_event({"type": "conversation", "conversation_id": conversation_id})
             
             # Persist user message
@@ -255,12 +256,10 @@ async def chat_stream_handler(
                         
                         # Capture content for persistence
                         if data.get("type") in ["message", "completed_message"] and "content" in data:
-                            # Avoid double counting if we get both message and completed_message with same content
-                            # But typical SSE from standard chat sends deltas, then completed.
-                            # Standard AI Foundry usually sends "content" as delta.
-                            # If it's a delta:
                             if data.get("type") == "message":
                                 accumulated_response += data["content"]
+                        elif data.get("type") == "completion_summary":
+                            accumulated_response = data.get("final_answer", "")
                         
                         yield serialize_sse_event(data)
                     except json.JSONDecodeError:

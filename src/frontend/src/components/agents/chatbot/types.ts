@@ -7,12 +7,12 @@ export interface IFileEntity {
   name: string;
   size: number;
   status?:
-    | "pending"
-    | "uploading"
-    | "uploaded"
-    | "error"
-    | "deleting"
-    | "processed";
+  | "pending"
+  | "uploading"
+  | "uploaded"
+  | "error"
+  | "deleting"
+  | "processed";
   type: string;
   progress?: boolean;
   supportFileType?: string;
@@ -42,6 +42,7 @@ export interface IChatItem {
   more?: {
     time?: string;
   };
+  thoughts?: string[];
 }
 
 export interface ChatInputProps {

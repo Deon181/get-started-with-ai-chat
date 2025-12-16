@@ -132,15 +132,20 @@ class WorkflowClient:
             conversation = await openai_client.conversations.create()
             logger.info("Created conversation (id: %s)", conversation.id)
 
-            stream = await openai_client.responses.create(
-                conversation=conversation.id,
-                extra_body={"agent": {"name": self.workflow_name, "type": "agent_reference"}},
-                input=transcript,
-                stream=True,
-                metadata={"x-ms-debug-mode-enabled": "1"},
-            )
+            stream_params = {
+                "conversation": conversation.id,
+                "extra_body": {"agent": {"name": self.workflow_name, "type": "agent_reference"}},
+                "input": transcript,
+                "stream": True,
+                "metadata": {"x-ms-debug-mode-enabled": "1"},
+            }
+            logger.info("Starting stream with params: %s", json.dumps(stream_params, default=str))
 
-            accumulated: list[str] = []
+            stream = await openai_client.responses.create(**stream_params)
+
+            items_content = {}
+            item_order = []
+            current_item_id = "default"
 
             async for event in stream:
                 etype = self._event_type_str(event)
@@ -148,35 +153,78 @@ class WorkflowClient:
                 if etype == self._EV_OUTPUT_TEXT_DELTA:
                     delta = getattr(event, "delta", None)
                     if delta:
-                        accumulated.append(delta)
-                        yield json.dumps({"type": "message", "content": delta})
+                        logger.info(f"Stream delta: {delta}")
+                        if current_item_id not in items_content:
+                            items_content[current_item_id] = ""
+                            item_order.append(current_item_id)
+                        
+                        items_content[current_item_id] += delta
+                        yield json.dumps({"type": "message_delta", "id": current_item_id, "content": delta})
 
                 elif etype == self._EV_OUTPUT_TEXT_DONE:
-                    # final text chunk done (we assemble from deltas)
+                    # final text chunk done
+                    logger.info("Stream text done")
                     pass
 
-                elif etype in (self._EV_OUTPUT_ITEM_ADDED, self._EV_OUTPUT_ITEM_DONE):
-                    # Optional: inspect workflow actions
+                elif etype == self._EV_OUTPUT_ITEM_ADDED:
+                    # New item started
                     item = getattr(event, "item", None)
-                    if item is not None and getattr(item, "type", None) == "workflow_action":
+                    item_type = getattr(item, "type", "unknown")
+                    item_id = getattr(item, "id", "unknown")
+                    current_item_id = item_id # Switch current tracking ID
+                    
+                    logger.info(f"Stream item added: type={item_type} id={item_id}")
+                    
+                    if item_id not in items_content:
+                        items_content[item_id] = ""
+                        item_order.append(item_id)
+
+                    # Inspect workflow actions
+                    if item is not None and item_type == "workflow_action":
+                        status = getattr(item, "status", "")
+                        logger.info(f"Workflow Action Started: {getattr(item, 'kind', '')} (id={getattr(item, 'action_id', '')})")
+                        
+                        # Yield action as a delta so it appears strictly as an item (thought)
+                        msg = f"[workflow_action] {getattr(item, 'action_id', '')} status={status}"
+                        items_content[item_id] += msg
                         yield json.dumps(
                             {
-                                "type": "message",
-                                "content": f"[workflow_action] {getattr(item, 'action_id', '')} "
-                                           f"status={getattr(item, 'status', '')}",
+                                "type": "message_delta",
+                                "id": item_id,
+                                "content": msg,
                             }
                         )
+
+                elif etype == self._EV_OUTPUT_ITEM_DONE:
+                    item = getattr(event, "item", None)
+                    item_id = getattr(item, "id", "unknown")
+                    logger.info(f"Stream item done: type={getattr(item, 'type', 'unknown')} id={item_id}")
+
+                elif etype == "response.created":
+                    logger.info("Stream response created")
+
+                elif etype == "response.completed":
+                    logger.info("Stream response completed")
 
                 elif etype == self._EV_ERROR:
                     logger.error("Stream error event: %s", event)
                     yield json.dumps({"type": "message", "content": f"[Error event] {event}"})
 
                 else:
-                    # keep quiet or log if you want:
-                    # logger.debug("Unhandled event type: %s", etype)
+                    # Ignore other granular events like content_part.added/done to reduce noise
                     pass
 
-            yield json.dumps({"type": "completed_message", "content": "".join(accumulated)})
+            # Determine final answer (last item content)
+            final_answer = ""
+            if item_order:
+                last_id = item_order[-1]
+                final_answer = items_content.get(last_id, "")
+
+            # Send summary for history persistence
+            yield json.dumps({"type": "completion_summary", "final_answer": final_answer})
+            
+            # Send final completion for frontend (optional if frontend uses deltas, but good for cleanup)
+            yield json.dumps({"type": "completed_message", "content": final_answer})
 
         except Exception as e:
             logger.error("Workflow invocation failed: %s", e)

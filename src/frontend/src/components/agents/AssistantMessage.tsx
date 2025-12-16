@@ -27,10 +27,10 @@ export function AssistantMessage({
   const hasAnnotations = message.annotations && message.annotations.length > 0;
   const references = hasAnnotations
     ? message.annotations?.map((annotation, index) => (
-        <div key={index} className="reference-item">
-          {annotation.text || annotation.file_name}
-        </div>
-      ))
+      <div key={index} className="reference-item">
+        {annotation.text || annotation.file_name}
+      </div>
+    ))
     : [];
 
   return (
@@ -79,6 +79,20 @@ export function AssistantMessage({
       loadingState={loadingState}
       name={agentName ?? "Bot"}
     >
+      {message.thoughts && message.thoughts.length > 0 && (
+        <details className={styles.thoughtContainer} open>
+          <summary className={styles.thoughtSummary}>
+            Thinking Process ({message.thoughts.length})
+          </summary>
+          <div className={styles.thoughtContent}>
+            {message.thoughts.map((thought, idx) => (
+              <div key={idx} className={styles.thoughtItem}>
+                <Markdown content={thought} />
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
       <Suspense fallback={<Spinner size="small" />}>
         <Markdown content={message.content} />
       </Suspense>
