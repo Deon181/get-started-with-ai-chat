@@ -102,12 +102,19 @@ async def lifespan(app: fastapi.FastAPI):
     app.state.chat_model = os.environ["AZURE_AI_CHAT_DEPLOYMENT_NAME"]
 
     # Initialize Workflow Client if configured
-    workflow_endpoint = os.getenv("AZURE_WORKFLOW_ENDPOINT")
-    if workflow_endpoint:
+    workflow_name = os.getenv("AZURE_WORKFLOW_NAME")
+    # We check if we are meant to use workflow. Typically this was gated by endpoint presence.
+    # Now we might gate it by workflow name presence? Or keep using AZURE_WORKFLOW_ENDPOINT variable as a toggle?
+    # The user didn't specify removing AZURE_WORKFLOW_ENDPOINT entirely as a config, but the new code doesn't use it.
+    # Let's rely on AZURE_WORKFLOW_NAME or fallback to attempt-1 if project is available?
+    # Better to check if AZURE_WORKFLOW_NAME is set, OR legacy check.
+    # Let's assume if we have a project client, we are good to go if workflow name is known.
+    
+    if workflow_name or os.getenv("AZURE_WORKFLOW_ENDPOINT"): 
         from .workflow_client import WorkflowClient
-        logger.info(f"Initializing Workflow Client with endpoint: {workflow_endpoint}")
-        # Use the same credential as other clients
-        app.state.workflow_client = WorkflowClient(endpoint=workflow_endpoint, credential=azure_credential)
+        target_workflow = workflow_name or "attempt-1" # Fallback or use env
+        logger.info(f"Initializing Workflow Client for workflow: {target_workflow}")
+        app.state.workflow_client = WorkflowClient(project_client=project, workflow_name=target_workflow)
     else:
         app.state.workflow_client = None
 
