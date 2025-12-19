@@ -1,3 +1,5 @@
+import * as React from "react";
+import { Suspense } from "react";
 import { Button, Spinner } from "@fluentui/react-components";
 import { bundleIcon, DeleteFilled, DeleteRegular } from "@fluentui/react-icons";
 import { CopilotMessageV2 as CopilotMessage } from "@fluentui-copilot/react-copilot-chat";
@@ -5,7 +7,6 @@ import {
   ReferenceListV2 as ReferenceList,
   ReferenceOverflowButton,
 } from "@fluentui-copilot/react-reference";
-import { Suspense } from "react";
 
 import { Markdown } from "../core/Markdown";
 import { UsageInfo } from "./UsageInfo";
@@ -24,6 +25,24 @@ export function AssistantMessage({
   showUsageInfo,
   onDelete,
 }: IAssistantMessageProps): React.JSX.Element {
+  /* 
+   * Thinking Process State Management
+   * - Default to open/expanded if currently loading/streaming.
+   * - Default to closed/collapsed if static/history.
+   */
+  const [isThinkingOpen, setIsThinkingOpen] = React.useState(
+    loadingState === "loading" || loadingState === "streaming"
+  );
+
+  // Effect to auto-open when streaming starts, auto-close when done
+  React.useEffect(() => {
+    if (loadingState === "loading" || loadingState === "streaming") {
+      setIsThinkingOpen(true);
+    } else if (loadingState === "none") {
+      setIsThinkingOpen(false);
+    }
+  }, [loadingState]);
+
   const hasAnnotations = message.annotations && message.annotations.length > 0;
   const references = hasAnnotations
     ? message.annotations?.map((annotation, index) => (
@@ -80,18 +99,26 @@ export function AssistantMessage({
       name={agentName ?? "Bot"}
     >
       {message.thoughts && message.thoughts.length > 0 && (
-        <details className={styles.thoughtContainer} open>
-          <summary className={styles.thoughtSummary}>
-            Thinking Process ({message.thoughts.length})
-          </summary>
-          <div className={styles.thoughtContent}>
-            {message.thoughts.map((thought, idx) => (
-              <div key={idx} className={styles.thoughtItem}>
-                <Markdown content={thought} />
-              </div>
-            ))}
+        <div className={styles.thoughtContainer}>
+          <div
+            className={styles.thoughtSummary}
+            onClick={() => setIsThinkingOpen(!isThinkingOpen)}
+            style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', userSelect: 'none' }}
+          >
+            <span style={{ fontSize: '10px', transform: isThinkingOpen ? 'rotate(90deg)' : 'rotate(0deg)', transition: 'transform 0.2s' }}>▶</span>
+            <span>Thinking Process ({message.thoughts.length})</span>
           </div>
-        </details>
+
+          {isThinkingOpen && (
+            <div className={styles.thoughtContent}>
+              {message.thoughts.map((thought, idx) => (
+                <div key={idx} className={styles.thoughtItem}>
+                  <Markdown content={thought} />
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       )}
       <Suspense fallback={<Spinner size="small" />}>
         <Markdown content={message.content} />

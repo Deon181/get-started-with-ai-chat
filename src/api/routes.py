@@ -237,6 +237,7 @@ async def chat_stream_handler(
 
             try:
                 accumulated_response = ""
+                accumulated_thoughts = []
                 async for chunk in workflow_client.stream_conversation(history_messages, conversation_id):
                     # The workflow client yields pre-formatted data: lines. 
                     # But wait, our client yields raw data content strings or jsons? 
@@ -258,8 +259,51 @@ async def chat_stream_handler(
                         if data.get("type") in ["message", "completed_message"] and "content" in data:
                             if data.get("type") == "message":
                                 accumulated_response += data["content"]
+                        elif data.get("type") == "message_delta":
+                            # Check if this is a thought/action (id based) or just text delta
+                            # For simplicity, if it has an ID, we assume it's part of the thinking process / items
+                            # The previous conversation history analysis showed workflow actions come as items.
+                            # We can also rely on the content being distinct.
+                            # However, `workflow_client.py` yields `message_delta` for BOTH text deltas and items.
+                            # We need to distinguish.
+                            # Re-reading workflow_client.py:
+                            # Text deltas: `yield json.dumps({"type": "message_delta", "id": current_item_id, "content": delta})`
+                            # Workflow actions: Yields `[workflow_action] ...` as content.
+                            
+                            # We want to capture the FULL content of items as thoughts.
+                            # But we don't want to capture the final answer text as a thought.
+                            # The complexity is that `workflow_client` doesn't explicitly flag "thought" vs "answer" in the JSON structure 
+                            # other than implicitly via `item_id`.
+                            
+                            # Actually, `workflow_client.py` logic:
+                            # `items_content` accumulates content for each ID.
+                            # `final_answer` is the content of the LAST item.
+                            # So everything BEFORE the last item is a thought.
+                            # BUT we are streaming here, we don't know which is the last item yet.
+                            
+                            # Alternative strategy:
+                            # We will rely on `workflow_client.py` sending `completion_summary`.
+                            # Does `completion_summary` contain the thoughts? No, only `final_answer`.
+                            
+                            # Let's look at `workflow_client.py` again.
+                            # It tracks `item_order`. 
+                            # We can replicate that logic here or modify `workflow_client` to send thoughts in `completion_summary`.
+                            # Modifying `workflow_client.py` is safer and cleaner.
+                            
+                            # WAIT - I should stick to the plan.
+                            # The plan said: "update workflow_stream ... track accumulated_thoughts ... append when message_delta events occur".
+                            
+                            # Let's refine the plan on the fly:
+                            # I will modify `workflow_client.py` to include `thoughts` in `completion_summary`.
+                            # That is WAY easier than reconstructing it in `routes.py`.
+                            
+                            # So for now, in `routes.py`, I will just prepare it to receive `thoughts` from `completion_summary`.
+                            pass
+
                         elif data.get("type") == "completion_summary":
                             accumulated_response = data.get("final_answer", "")
+                            # Expect thoughts to be passed here now
+                            accumulated_thoughts = data.get("thoughts", [])
                         
                         yield serialize_sse_event(data)
                     except json.JSONDecodeError:
@@ -269,7 +313,8 @@ async def chat_stream_handler(
                 
                 # Persist assistant response
                 if accumulated_response:
-                    chat_store.append_message(conversation_id, "assistant", accumulated_response)
+                    metadata = {"thoughts": accumulated_thoughts} if accumulated_thoughts else None
+                    chat_store.append_message(conversation_id, "assistant", accumulated_response, metadata=metadata)
                     
                 yield serialize_sse_event({"type": "stream_end"})
 

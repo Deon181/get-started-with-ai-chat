@@ -214,14 +214,27 @@ class WorkflowClient:
                     # Ignore other granular events like content_part.added/done to reduce noise
                     pass
 
-            # Determine final answer (last item content)
+            # Determine final answer (last item content) and thoughts (all previous items)
             final_answer = ""
+            thoughts = []
+            
             if item_order:
+                # The last item is the final answer
                 last_id = item_order[-1]
                 final_answer = items_content.get(last_id, "")
+                
+                # All previous items are thoughts
+                for i in range(len(item_order) - 1):
+                    tid = item_order[i]
+                    if tid in items_content:
+                        thoughts.append(items_content[tid])
 
             # Send summary for history persistence
-            yield json.dumps({"type": "completion_summary", "final_answer": final_answer})
+            yield json.dumps({
+                "type": "completion_summary", 
+                "final_answer": final_answer,
+                "thoughts": thoughts
+            })
             
             # Send final completion for frontend (optional if frontend uses deltas, but good for cleanup)
             yield json.dumps({"type": "completed_message", "content": final_answer})

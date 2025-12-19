@@ -78,6 +78,7 @@ export function AgentPreview({ agentDetails }: IAgentPreviewProps): ReactNode {
           role: msg.role,
           content: msg.content,
           isAnswer: msg.role === "assistant",
+          thoughts: msg.metadata?.thoughts,
           more: msg.created_at ? { time: msg.created_at } : undefined,
         })) ?? [];
       setMessageList(mapped);
